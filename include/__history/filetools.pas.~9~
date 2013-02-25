@@ -1,0 +1,584 @@
+unit filetools;
+
+interface
+
+uses Windows, Classes, SysUtils, Masks;
+
+{$IF CompilerVersion >= 18.5}
+ {$DEFINE SUPPORTED}
+{$IFEND}
+
+type
+
+   TFileLocation = packed record
+    path:PWideChar;
+    data:windows.TWIN32FindDataW;
+    {$IFDEF SUPPORTED}procedure cleanup;{$ENDIF}
+   end;
+   PFileLocation = ^TFileLocation;
+   procedure TFileLocationCleanup(var v:TFileLocation);
+
+type
+
+   PSearchQuery = ^TSearchQuery;
+   TSearchQuery = packed record
+    hfind:THandle;
+    path,wildcard:PWideChar;
+    recursive,w64,symboliclinksfolow,iterator:boolean;
+    subquery,parentquery:PSearchQuery;
+    inscantransaction:boolean;
+    {$IFDEF DEBUG}parentlevel:DWORD;{$ENDIF}
+    {$IFDEF SUPPORTED}
+     procedure create(aPath:WideString;aWildCard:WideString='*');
+     procedure createnested(aPath:PWideChar;aWildCard:PWideChar);
+     procedure cleanup;
+     procedure beginScanTransaction;
+     procedure endScanTransaction;
+    {$ENDIF}
+   end;
+   procedure TSearchQuery_create(var v:TSearchQuery;aPath:WideString;aWildCard:WideString='*');
+   procedure TSearchQuery_createnested(var v:TSearchQuery;aPath:PWideChar;aWildCard:PWideChar);
+   procedure TSearchQuery_cleanup(var v:TSearchQuery);
+   procedure TSearchQuery_beginScanTransaction(var v:TSearchQuery);
+   procedure TSearchQuery_endScanTransaction(var v:TSearchQuery);
+
+   function findSingleFile(query:WideString;var aFileLocation:TFileLocation;aFindHandle:PHandle=nil):boolean;
+   function findNextFile(var query:TSearchQuery;var aFileLocation:TFileLocation):boolean;
+
+   function FileNameConcatW(aDest:PWideChar;aName:PWideChar;aDirName:PWideChar=nil):PWideChar;
+
+   function IsRDPSession:boolean;
+
+   function IsWOW64Process:boolean;
+   function Disable64BitWOWRedirects(out v:Pointer):boolean;
+   function Restore64BitWOWRedirects(v:POinter):boolean;
+
+   function WideFirstDelimiter(const Delimiters,s:WideString):Integer;
+   function WideLastDelimiter(const Delimiters,s:WideString):Integer;
+   function WideStringReplace(const S,OldPattern,NewPattern:Widestring;Flags:TReplaceFlags):Widestring;
+
+implementation
+
+uses WideStrUtils;
+
+var matchMasks:TMask;
+    w64redirects:Pointer;
+
+{ utils }
+
+function TrimZeroW(v:WideString):WideString;
+var i:integer;
+begin
+ i:=Pos(#0,v);
+ if i=0 then Result:=v
+  else
+   begin
+    if i=0 then Result:='' else Result:=Copy(v,1,i-1);
+   end;
+end;
+
+function WStrScan(const s:PWideChar;c:WideChar):PWideChar;
+begin
+ Result:=s;
+ while Result^<>c do
+  begin
+   if Result^=#0 then
+    begin
+     Result:=nil;
+     Exit;
+    end;
+   inc(Result);
+  end;
+end;
+
+function WideLastDelimiter(const Delimiters,s:WideString):Integer;
+var p:PWideChar;
+begin
+ Result:=Length(s);
+ p:=PWideChar(Delimiters);
+ while Result>0 do
+  begin
+   if (s[Result]<>#0) and (WStrScan(p,s[Result])<>nil) then Exit;
+   dec(Result);
+  end;
+end;
+
+function WideFirstDelimiter(const Delimiters,s:WideString):Integer;
+var p:PWideChar;
+begin
+ Result:=1;
+ p:=PWideChar(Delimiters);
+ while Result<=Length(s) do
+  begin
+   if (s[Result]<>#0) and (WStrScan(p,s[Result])<>nil) then Exit;
+   inc(Result);
+  end;
+end;
+
+function WideStringReplace(const S,OldPattern,NewPattern:Widestring;Flags:TReplaceFlags):Widestring;
+var
+ SearchStr,Patt,NewStr:Widestring;
+ Offset:Integer;
+begin
+ if rfIgnoreCase in Flags then
+  begin
+   SearchStr:=WideUpperCase(S);
+   Patt:=WideUpperCase(OldPattern);
+  end
+ else
+  begin
+   SearchStr:=S;
+   Patt:=OldPattern;
+  end;
+ NewStr:=S;
+ Result:='';
+ while SearchStr<>'' do
+  begin
+   Offset:=Pos(Patt,SearchStr);
+   if Offset=0 then
+    begin
+     Result:=Result+NewStr;
+     Break;
+    end;
+   Result:=Result+Copy(NewStr,1,Offset-1)+NewPattern;
+   NewStr:=Copy(NewStr,Offset+Length(OldPattern),MaxInt);
+   if not (rfReplaceAll in Flags) then
+    begin
+     Result:=Result+NewStr;
+     Break;
+    end;
+   SearchStr:=Copy(SearchStr,Offset+Length(Patt),MaxInt);
+ end;
+end;
+
+function IsRDPSession:boolean;
+begin
+ Result:=GetSystemMetrics($1000)<>0;
+end;
+
+function IsWOW64Process:boolean;
+type TIsWow64Process = function(Handle:THandle;var res:BOOL):BOOL;stdcall;
+var
+ IsWow64Result:BOOL;
+ IsWow64Process:TIsWow64Process;
+begin
+ Result:=False;
+ if Win32MajorVersion<5 then Exit;
+ @IsWow64Process:=GetProcAddress(GetModuleHandle('kernel32'),PChar('IsWow64Process'));
+ if Assigned(@IsWow64Process) then
+  if not IsWow64Process(GetCurrentProcess,IsWow64Result) then Result:=False
+   else Result:=IsWow64Result;
+end;
+
+function Disable64BitWOWRedirects(out v:Pointer):boolean;
+type TWow64DisableWow64FsRedirection = function(out OldValue:Pointer):BOOL;stdcall;
+var
+ Wow64DisableWow64FsRedirection:TWow64DisableWow64FsRedirection;
+begin
+ Result:=False;
+ v:=nil;
+ if Win32MajorVersion<5 then begin Result:=True;Exit;end;
+ @Wow64DisableWow64FsRedirection:=GetProcAddress(GetModuleHandle('kernel32'),PChar('Wow64DisableWow64FsRedirection'));
+ if Assigned(@Wow64DisableWow64FsRedirection) then
+  Result:=Wow64DisableWow64FsRedirection(v);
+end;
+
+function Restore64BitWOWRedirects(v:Pointer):boolean;
+type TWow64RevertWow64FsRedirection = function(OldValue:Pointer):BOOL;stdcall;
+var
+ Wow64RevertWow64FsRedirection:TWow64RevertWow64FsRedirection;
+begin
+ Result:=False;
+ v:=nil;
+ if Win32MajorVersion<5 then begin Result:=True;Exit;end;
+ @Wow64RevertWow64FsRedirection:=GetProcAddress(GetModuleHandle('kernel32'),PChar('Wow64RevertWow64FsRedirection'));
+ if Assigned(@Wow64RevertWow64FsRedirection) then Result:=Wow64RevertWow64FsRedirection(v);
+end;
+
+function PathCombineW(szDest: PWideChar; lpszDir, lpszFile: PWideChar): PWideChar; stdcall; external 'shlwapi.dll' name 'PathCombineW';
+
+function FileNameConcatW(aDest:PWideChar;aName:PWideChar;aDirName:PWideChar=nil):PWideChar;
+begin
+ Result:=PathCombineW(aDest,aDirName,aName);
+end;
+
+{ TSearchQuery }{$IFDEF SUPPORTED}
+
+procedure TSearchQuery.beginScanTransaction;
+begin
+ if w64 then Disable64BitWOWRedirects(w64redirects);
+ inscantransaction:=true;
+end;
+
+procedure TSearchQuery.endScanTransaction;
+begin
+ if w64 then Restore64BitWOWRedirects(w64redirects);
+ inscantransaction:=false;
+end;
+
+procedure TSearchQuery.cleanup;
+var q:PSearchQuery;
+begin
+ if Assigned(path) then WStrDispose(path); path:=nil;
+ if Assigned(wildcard) then WStrDispose(wildcard); wildcard:=nil;
+ if Assigned(subquery) then
+  begin
+   q:=subquery;while Assigned(q^.subquery) do q:=q^.subquery;
+   repeat
+    q.cleanup;
+    if not Assigned(q.parentquery) then Break;
+    FreeMem(q.parentquery^.subquery,SizeOf(TSearchQuery));
+    q.parentquery^.subquery:=nil;
+    q:=q.parentquery;
+   until q=parentquery;
+  end;
+ hFind:=0;
+end;
+
+procedure TSearchQuery.create(aPath: WideString; aWildCard: WideString = '*');
+begin
+ w64:=IsWOW64Process;
+ hfind:=0;
+ path:=WStrNew(PWideChar(aPath));
+ wildcard:=WStrNew(PWideChar(aWildCard));
+ recursive:=true;
+ symboliclinksfolow:=false;
+ iterator:=False;
+ inscantransaction:=False;
+ parentquery:=nil;
+ subquery:=nil;
+ {$IFDEF DEBUG}parentlevel:=0;{$ENDIF}
+
+ if not Assigned(matchMasks) then matchMasks:=TMask.Create(OLEStrToString(PWideChar(aWildCard)));
+end;
+
+procedure TSearchQuery.createnested(aPath: PWideChar; aWildCard:PWideChar);
+begin
+ w64:=false;
+ 
+ hfind:=0;
+ if Assigned(aPath) then path:=WStrNew(aPath) else path:=nil;
+ if Assigned(aWildCard) then wildcard:=WStrNew(aWildCard) else wildcard:=nil; 
+ recursive:=true;
+ symboliclinksfolow:=false;
+ iterator:=False;
+ inscantransaction:=False;
+ parentquery:=nil;
+ subquery:=nil;
+
+ {$IFDEF DEBUG}parentlevel:=0;{$ENDIF}
+end;{$ELSE}
+
+procedure TSearchQuery_create(var v:TSearchQuery;aPath:WideString;aWildCard:WideString='*');
+begin
+ with v do
+  begin
+   w64:=IsWOW64Process;
+   hfind:=0;
+   path:=WStrNew(PWideChar(aPath));
+   wildcard:=WStrNew(PWideChar(aWildCard));
+   recursive:=true;
+   symboliclinksfolow:=false;
+   iterator:=False;
+   inscantransaction:=False;
+   parentquery:=nil;
+   subquery:=nil;
+   {$IFDEF DEBUG}parentlevel:=0;{$ENDIF}
+
+   if not Assigned(matchMasks) then matchMasks:=TMask.Create(OLEStrToString(PWideChar(aWildCard)));
+  end; 
+end;
+
+procedure TSearchQuery_createnested(var v:TSearchQuery;aPath:PWideChar;aWildCard:PWideChar);
+begin
+ with v do
+  begin
+   w64:=false;
+
+   hfind:=0;
+   if Assigned(aPath) then path:=WStrNew(aPath) else path:=nil;
+   if Assigned(aWildCard) then wildcard:=WStrNew(aWildCard) else wildcard:=nil;
+   recursive:=true;
+   symboliclinksfolow:=false;
+   iterator:=False;
+   inscantransaction:=False;
+   parentquery:=nil;
+   subquery:=nil;
+
+   {$IFDEF DEBUG}parentlevel:=0;{$ENDIF}
+  end; 
+end;
+
+procedure TSearchQuery_cleanup(var v:TSearchQuery);
+var q:PSearchQuery;
+begin
+ with v do
+  begin
+   if Assigned(path) then WStrDispose(path); path:=nil;
+   if Assigned(wildcard) then WStrDispose(wildcard); wildcard:=nil;
+   if Assigned(subquery) then
+    begin
+     q:=subquery;while Assigned(q^.subquery) do q:=q^.subquery;
+     repeat
+      {$IFDEF SUPPORTED}q^.cleanup;{$ELSE};TSearchQuery_cleanup(q^);{$ENDIF}
+      if not Assigned(q.parentquery) then Break;
+      FreeMem(q.parentquery^.subquery,SizeOf(TSearchQuery));
+      q.parentquery^.subquery:=nil;
+      q:=q.parentquery;
+     until q=parentquery;
+    end;
+   hFind:=0;
+  end; 
+end;
+
+procedure TSearchQuery_beginScanTransaction(var v:TSearchQuery);
+begin
+ if v.w64 then Disable64BitWOWRedirects(w64redirects);
+ v.inscantransaction:=true;
+end;
+
+procedure TSearchQuery_endScanTransaction(var v:TSearchQuery);
+begin
+ if v.w64 then Restore64BitWOWRedirects(w64redirects);
+ v.inscantransaction:=false;
+end;{$ENDIF}
+
+{ TFileLocation }{$IFDEF SUPPORTED}
+
+procedure TFileLocation.cleanup;
+begin
+ if Assigned(path) then WStrDispose(path);
+ path:=nil;
+end;{$ENDIF}
+
+procedure TFileLocationCleanup(var v:TFileLocation);
+begin
+ with v do
+  begin
+   if Assigned(path) then WStrDispose(path);
+   path:=nil;
+  end;
+end;
+
+///////////////////////////////////////////////////////////////////////////////
+
+const FILE_ATTRIBUTE_REPARSE_POINT  = $00000400;
+
+function findNextFile(var query:TSearchQuery;var aFileLocation:TFileLocation):boolean;
+var
+ wow64redirects:Pointer;
+ current:PSearchQuery;
+ scanquery:PWideChar;
+ scanresult:DWORD;
+
+ function lastquery:PSearchQuery;
+ begin
+  Result:=@query;
+  while Assigned(Result^.subquery) do Result:=Result^.subquery;
+ end;
+
+ function everythingmask(v:PSearchQuery):boolean;{$IFDEF SUPPORTED}inline;{$ENDIF}
+ var _x:WideString;
+ begin
+  _x:=trim(WideString(v^.wildcard));
+  Result:=((_x='') or (_x='*') or (_x='*.*'));
+ end;
+
+ function _makepath(v:PSearchQuery):PWideChar;
+ begin
+  Result:=WStrAlloc(Windows.MAX_PATH);
+  if everythingmask(v) then Result:=FileNameConcatW(Result,'*',v^.path)
+    else if v^.iterator then
+     begin
+      Result:=FileNameConcatW(Result,'*',v^.path); // parsing for extentions elsewhere
+     end else Result:=FileNameConcatW(Result,v^.wildcard,v^.path);
+ end;
+
+ function nexttrip(var v:TSearchQuery;var location:TFileLocation):boolean;//inline;
+ begin
+  if v.iterator then Result:=True else Result:=findNextFile(v,location);
+ end;
+
+ function _analytics(var v:TSearchQuery):boolean;
+ var
+  q:PSearchQuery;
+  npath:PWideChar;
+ begin
+  q:=lastquery;
+  if ((aFileLocation.data.dwFileAttributes and FILE_ATTRIBUTE_DIRECTORY)<>0) then
+   begin
+    case q^.recursive of
+     true:begin
+           if (aFileLocation.data.cFileName[0]<>'.') and (aFileLocation.data.cFileName[1]<>'..') then
+            begin
+
+             if (aFileLocation.data.dwFileAttributes and FILE_ATTRIBUTE_REPARSE_POINT)<>0 then
+              if not query.symboliclinksfolow then
+               begin
+                Result:=findNextFile(v,aFileLocation);
+                Exit;
+               end;
+
+             npath:=WStrAlloc(Windows.MAX_PATH);
+             npath:=FileNameConcatW(npath,aFileLocation.data.cFileName,q^.path);
+
+             q^.subquery:=AllocMem(SizeOf(TSearchQuery));
+             {$IFDEF SUPPORTED}q^.subquery^.createnested(npath,q.wildcard);{$ELSE}TSearchQuery_createnested(q^.subquery^,npath,q.wildcard);{$ENDIF}
+             q^.subquery^.w64:=v.w64;
+             q^.subquery^.recursive:=v.recursive;
+             q^.subquery^.symboliclinksfolow:=v.symboliclinksfolow;
+             q^.subquery^.iterator:=v.iterator;
+             q^.subquery^.inscantransaction:=v.inscantransaction;
+             q^.subquery^.parentquery:=q;
+             {$IFDEF DEBUG}q^.subquery^.parentlevel:=v.parentlevel+1;{$ENDIF}
+
+             if Assigned(npath) then WStrDispose(npath);
+
+             Result:=findNextFile(v,aFileLocation);
+            end else Result:=findNextFile(v,aFileLocation);
+          end;
+     else Result:=findNextFile(v,aFileLocation);
+    end;
+   end
+  else
+   begin
+    if (aFileLocation.data.cFileName[0]<>'.') and (aFileLocation.data.cFileName[1]<>'..') then
+     begin
+
+      if (aFileLocation.data.dwFileAttributes and FILE_ATTRIBUTE_REPARSE_POINT)<>0 then
+       if not query.symboliclinksfolow then
+        begin
+         Result:=findNextFile(v,aFileLocation);
+         Exit;
+        end;
+
+      aFileLocation.path:=WStrAlloc(Windows.MAX_PATH);
+      aFileLocation.path:=FileNameConcatW(aFileLocation.path,aFileLocation.data.cFileName,q^.path);
+      Result:=True;
+
+      if q^.iterator then
+       if not everythingmask(current) then
+        if Assigned(matchMasks) then
+         Result:=matchMasks.Matches(OleStrToString(aFileLocation.path));
+
+     end else Result:=findNextFile(v,aFileLocation); // weird
+   end;
+ end;
+
+begin
+ Result:=False;
+ wow64redirects:=nil;
+ scanresult:=ERROR_SUCCESS;
+
+ current:=lastquery;
+ FillChar(aFileLocation,SizeOf(TFileLocation),#0);
+
+ case current^.hfind of
+  0:begin
+     if not current^.inscantransaction then
+      if current^.w64 then Disable64BitWOWRedirects(wow64redirects);
+
+     scanquery:=_makepath(current);
+     {$IFDEF DEBUG}OutputDebugStringW(scanquery);{$ENDIF}
+     current^.hFind:=FindFirstFileW(scanquery,aFileLocation.data);
+     if Assigned(scanquery) then WStrDispose(scanquery);
+
+     if not current^.inscantransaction then
+      if current^.w64 then Restore64BitWOWRedirects(wow64redirects);
+
+     if current^.hFind=INVALID_HANDLE_VALUE then Exit else Result:=_analytics(query);
+    end;
+  else begin
+        if not current^.inscantransaction then
+         if current^.w64 then Disable64BitWOWRedirects(wow64redirects);
+        Result:=FindNextFileW(current^.hFind,aFileLocation.data);
+        if not current^.inscantransaction then
+         if current^.w64 then Restore64BitWOWRedirects(wow64redirects);
+
+        if not Result then scanresult:=GetLastError;
+        if Result then
+         Result:=Result and _analytics(query);
+
+        if not Result then
+         case scanresult=ERROR_NO_MORE_FILES of
+          false:begin
+                 if query.iterator then
+                  begin
+                   if assigned(current^.subquery) then
+                    begin
+                     {$IFDEF SUPPORTED}current^.subquery^.cleanup;{$ELSE}TSearchQuery_cleanup(current^.subquery^);{$ENDIF}
+                     FreeMem(current^.subquery,SizeOf(TSearchQuery));
+                     current^.subquery:=nil;
+                    end;
+                   SleepEx(0,True);
+
+                   // decision making, continue scan or not
+                   if not query.recursive and (query.hfind=0) then Result:=False
+                    else if not Assigned(query.subquery) and not Assigned(query.parentquery) and (query.hfind=0) then Result:=False
+                     else Result:=True and findNextFile(query,aFileLocation);
+
+                  end;
+                end;
+          else begin
+                if not query.iterator then
+                 begin
+                  windows.FindClose(current^.hfind);
+                  current^.hfind:=0;
+                  if assigned(current^.parentquery) then
+                   begin
+                    {$IFDEF SUPPORTED}current^.cleanup;{$ELSE}TSearchQuery_cleanup(current^);{$ENDIF}
+                    FreeMem(current^.parentquery^.subquery,SizeOf(TSearchQuery));
+                    current^.parentquery^.subquery:=nil;
+                    SleepEx(0,True);
+                    Result:=True and findNextFile(query,aFileLocation);
+                   end;
+                 end
+                else
+                 begin
+                  windows.FindClose(current^.hfind);
+                  current^.hfind:=0;
+                  if assigned(current^.parentquery) then
+                   begin
+                    {$IFDEF SUPPORTED}current^.cleanup;{$ELSE}TSearchQuery_cleanup(current^);{$ENDIF}
+                    FreeMem(current^.parentquery^.subquery,SizeOf(TSearchQuery));
+                    current^.parentquery^.subquery:=nil;
+                    SleepEx(0,True);
+                    Result:=True and findNextFile(query,aFileLocation);
+                   end;
+                 end;
+               end;
+         end;
+       end;
+ end;
+ if not Result then {$IFDEF SUPPORTED}aFileLocation.cleanup;{$ELSE}TFileLocationCleanup(aFileLocation);{$ENDIF}
+end;
+
+function findSingleFile(query:WideString;var aFileLocation:TFileLocation;aFindHandle:PHandle):boolean;
+var
+ w64:boolean;
+ wow64redirects:pointer;
+ hFind:THandle;
+begin
+ Result:=False;
+ FillChar(aFileLocation,SizeOf(TFileLocation),#0);
+ if Assigned(aFindHandle) then aFindHandle^:=0;
+ w64:=IsWOW64Process;
+ if w64 then Disable64BitWOWRedirects(wow64redirects);
+ hFind:=FindFirstFileW(PWideChar(query),aFileLocation.data);
+ if w64 then Restore64BitWOWRedirects(wow64redirects);
+ if hFind=INVALID_HANDLE_VALUE then Exit
+  else
+   begin
+    aFileLocation.path:=WStrNew(PWideChar(query));
+    if Assigned(aFindHandle) then aFindHandle^:=hFind;
+    Result:=True;
+   end;
+end;
+
+initialization
+ matchMasks:=nil;
+ w64redirects:=nil;
+finalization
+ if Assigned(matchMasks) then FreeAndNil(matchMasks);
+ Restore64BitWOWRedirects(w64redirects);
+end.

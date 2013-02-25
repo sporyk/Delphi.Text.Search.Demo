@@ -1,0 +1,17 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<BorlandProject>
+	<Transactions>
+    <Transaction>2013/02/07 09:50:41.000.626,=D:\Profiles\Alex\Documents\RAD Studio\Projects\Unit1.pas</Transaction>
+    <Transaction>2013/02/07 09:51:01.000.042,=D:\Profiles\Alex\Documents\RAD Studio\Projects\Unit1.pas</Transaction>
+    <Transaction>2013/02/07 09:51:21.000.436,=D:\Profiles\Alex\Documents\RAD Studio\Projects\Unit1.pas</Transaction>
+    <Transaction>2013/02/16 13:49:32.000.000,=D:\Profiles\Alex\Documents\RAD Studio\Projects\Unit1.pas</Transaction>
+    <Transaction>2013/02/16 13:49:44.000.331,D:\Profiles\Alex\Documents\Aella\SkyDrive\Delphi\files.text.finder\main.pas=D:\Profiles\Alex\Documents\RAD Studio\Projects\Unit1.pas</Transaction>
+    <Transaction>2013/02/16 13:49:44.000.331,D:\Profiles\Alex\Documents\Aella\SkyDrive\Delphi\files.text.finder\main.dfm=D:\Profiles\Alex\Documents\RAD Studio\Projects\Unit1.dfm</Transaction>
+    <Transaction>2013/02/16 13:49:46.000.257,D:\Profiles\Alex\Documents\Aella\SkyDrive\Delphi\files.text.finder\test.dproj=D:\Profiles\Alex\Documents\RAD Studio\Projects\Project1.dproj</Transaction>
+    <Transaction>2013/02/16 13:57:38.000.652,=D:\Profiles\Alex\Documents\Aella\SkyDrive\Delphi\files.text.finder\include\filetools.pas</Transaction>
+    <Transaction>2013/02/16 13:58:01.000.596,D:\Profiles\Alex\Documents\Aella\SkyDrive\Delphi\files.text.finder\include\filetools.pas=</Transaction>
+    <Transaction>2013/02/21 23:10:09.000.386,=C:\Users\user\SkyDrive\Delphi\files.text.finder\Unit1.pas</Transaction>
+    <Transaction>2013/02/21 23:10:18.000.148,C:\Users\user\SkyDrive\Delphi\files.text.finder\include\utils.pas=C:\Users\user\SkyDrive\Delphi\files.text.finder\Unit1.pas</Transaction>
+    <Transaction>2013/02/21 23:10:21.000.610,C:\Users\user\SkyDrive\Delphi\files.text.finder\include\utils.pas=</Transaction>
+  </Transactions>
+</BorlandProject>
